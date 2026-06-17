@@ -1,0 +1,287 @@
+{
+  "name": "Berita Harian Rico",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 17 * * *"
+            }
+          ]
+        }
+      },
+      "id": "8d1995a9-6221-4398-b30b-97fddc8be34a",
+      "name": "Schedule Trigger (00:00 WIB)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1424,
+        176
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://news.google.com/rss/search?q=saham+OR+idx+OR+tbk+when:1d&hl=id&gl=ID&ceid=ID:id",
+        "options": {}
+      },
+      "id": "0075ff64-42e2-4137-b602-7a457acaef04",
+      "name": "Google News RSS",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.2,
+      "position": [
+        -1168,
+        32
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "url": "https://www.cnbcindonesia.com/market/rss",
+        "options": {}
+      },
+      "id": "7d7986df-b45f-4c06-96a2-d51a8453e9a6",
+      "name": "CNBC Indonesia RSS",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.2,
+      "position": [
+        -1168,
+        176
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "numberInputs": 4
+      },
+      "id": "fd879a94-2134-4412-a197-ae66c1b31e68",
+      "name": "Merge RSS",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        -864,
+        256
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 1. Definisikan aturan kata kunci & skor\nconst KEYWORDS_RIGHT_ISSUE = [\"right issue\", \"hm etd\", \"hmetd\", \"pmhmetd\", \"pm hm etd\", \"pmhm etd\"];\n\nconst KEYWORDS_UTAMA = {\n    \"Akuisisi\": [\"akuisisi\", \"mengakuisisi\"],\n    \"Pengambilalihan\": [\"pengambilalihan\", \"takeover\"],\n    \"Perubahan Pengendali\": [\"perubahan pengendali\", \"pengendali baru\", \"perubahan kepemilikan\"],\n    \"Inbreng / Setoran Aset\": [\"inbreng\", \"setoran aset\", \"penyertaan aset\", \"penambahan modal non kas\"],\n    \"Transaksi Material\": [\"transaksi material\"],\n    \"Afiliasi\": [\"afiliasi\"],\n    \"Right Issue\": [\"right issue\", \"rights issue\", \"hmetd\", \"penerbitan saham baru\"], \n    \"Penambahan Modal\": [\"penambahan modal\", \"private placement\"] // \"ihsg\" SUDAH DILEPAS DARI SINI\n};\n\n// Keyword khusus untuk fallback (Prioritas Terakhir)\nconst KEYWORDS_IHSG = [\"ihsg\", \"indeks harga saham gabungan\"];\n\nconst SCORE_MAP = {\n    \"Akuisisi\": 3,\n    \"Pengambilalihan\": 3,\n    \"Perubahan Pengendali\": 3,\n    \"Inbreng / Setoran Aset\": 3,\n    \"Right Issue\": 2,\n    \"Penambahan Modal\": 2,\n    \"Transaksi Material\": 2,\n    \"Afiliasi\": 1\n};\n\n// 2. Ambil data masuk dari seluruh RSS\nconst items = $input.all();\nlet processedNews = [];\nlet seenLinks = new Set();\n\nfor (let item of items) {\n    const title = (item.json.title || '').toLowerCase();\n    const link = item.json.link || '';\n    \n    if (!title || !link || seenLinks.has(link)) continue;\n    \n    let score = 0;\n    let matched = false;\n    \n    // Prioritas 1: Cek Right Issue terlebih dahulu agar tidak double count\n    let isRightIssue = KEYWORDS_RIGHT_ISSUE.some(kw => title.includes(kw));\n    if (isRightIssue) {\n        score += SCORE_MAP[\"Right Issue\"];\n        matched = true;\n    }\n    \n    // Prioritas 2: Cek kategori utama lainnya\n    for (let [category, kws] of Object.entries(KEYWORDS_UTAMA)) {\n        if (category === \"Right Issue\" && isRightIssue) continue;\n        \n        if (kws.some(kw => title.includes(kw))) {\n            score += SCORE_MAP[category] || 0;\n            matched = true;\n        }\n    }\n    \n    // Prioritas 3: JIKA KEYWORD UTAMA TIDAK ADA, BARU BAHAS IHSG\n    if (!matched) {\n        let isIHSG = KEYWORDS_IHSG.some(kw => title.includes(kw));\n        if (isIHSG) {\n            score = 0.5; // Skor terkecil agar selalu berada di posisi paling bawah/akhir\n            matched = true;\n        }\n    }\n    \n    if (matched && score > 0) {\n        seenLinks.add(link);\n        processedNews.push({\n            judul: item.json.title.trim(),\n            link: link.trim(),\n            score: score\n        });\n    }\n}\n\n// 3. Sorting berdasarkan Score tertinggi\nprocessedNews.sort((a, b) => b.score - a.score);\n\n// 4. Potong langsung menjadi maksimal 10 berita teratas (Tanpa dipisah)\nconst topNews = processedNews.slice(0, 10);\n\n// Jika tidak ada berita sama sekali, hentikan workflow\nif (topNews.length === 0) {\n    return []; \n}\n\nconst output = [];\n\n// 5. Format Menjadi Satu Pesan Tunggal\nlet telegramMessage = \"⚡ *TOP 10 BERITA SAHAM PILIHAN* ⚡\\n\\n\";\ntopNews.forEach((news, index) => {\n    telegramMessage += `${index + 1}. [${news.judul}] : ${news.link}\\n\\n`;\n});\n\noutput.push({ json: { sendMessage: true, text: telegramMessage } });\n\nreturn output;"
+      },
+      "id": "d4c05d97-cf2e-4d20-962d-044ed7449c20",
+      "name": "Filter & Score Berita",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -624,
+        256
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "condition-send",
+              "leftValue": "={{ $json.sendMessage }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "794c072e-ca03-4c06-ab0c-7720211eb8cd",
+      "name": "IF Ada Berita",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -368,
+        256
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "7570216333",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "9c96475f-dac9-43d5-843c-3dd3e8bec4dd",
+      "name": "Kirim ke Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -64,
+        208
+      ],
+      "webhookId": "53bc03f4-3acd-49d8-b6f5-82065b7fe4ab",
+      "credentials": {
+        "telegramApi": {
+          "id": "WUb0VxVVEXVr0egX",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://www.cnbcindonesia.com/market/rss",
+        "options": {}
+      },
+      "id": "ef032d5b-6e13-4e02-aec3-09f4023c479a",
+      "name": "CNBC Finance RSS",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.2,
+      "position": [
+        -1168,
+        320
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "url": "https://finance.detik.com/rss",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.2,
+      "position": [
+        -1184,
+        512
+      ],
+      "id": "e2198acf-6ea1-4365-81ea-dc0dae8ec765",
+      "name": "Detik RSS Read"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger (00:00 WIB)": {
+      "main": [
+        [
+          {
+            "node": "Google News RSS",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "CNBC Indonesia RSS",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "CNBC Finance RSS",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Detik RSS Read",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google News RSS": {
+      "main": [
+        [
+          {
+            "node": "Merge RSS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CNBC Indonesia RSS": {
+      "main": [
+        [
+          {
+            "node": "Merge RSS",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge RSS": {
+      "main": [
+        [
+          {
+            "node": "Filter & Score Berita",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter & Score Berita": {
+      "main": [
+        [
+          {
+            "node": "IF Ada Berita",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Ada Berita": {
+      "main": [
+        [
+          {
+            "node": "Kirim ke Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CNBC Finance RSS": {
+      "main": [
+        [
+          {
+            "node": "Merge RSS",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Detik RSS Read": {
+      "main": [
+        [
+          {
+            "node": "Merge RSS",
+            "type": "main",
+            "index": 3
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "91da2270-4b67-47a3-9d69-1f16f6e50423",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "3c8d6036256de79a828380f1587bbd425300834729ce195eb3e8dc2ead79af2e"
+  },
+  "nodeGroups": [],
+  "id": "2SE6XU2IpkwBTJPe",
+  "tags": []
+}
